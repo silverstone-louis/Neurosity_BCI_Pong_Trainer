@@ -7,6 +7,10 @@ In order to make use of it with a neurosity crown, you will need to select only 
 
 Feel free to not do that and instead use the script that I wrote and included in the project files, or just use the pretrained model and fine tune it over time by playing pong with the headset and periodically retraining the model on 'suceess data' (neurosity features) output as jsonl by the pong trainer and/or on the lsl data streams (raw brainwaves, psd, Power by Band, events) that the script outputs. In order to record lsl, you'll need to use labrecorder (free - https://github.com/labstreaminglayer/App-LabRecorder) or some other program. I use labrecorder because its simple and open source. 
 
+I'm sure you will find that many of these scripts are non-functional without modification because many contain absolute file paths to locations on the local machine I used for development. 
+
+I'm going to fix it, but I'm only 1 person and this is a hobby project. [I'll delete this note when the references are corrected].
+
 Citations:
 
 https://neurosity.co/crown
