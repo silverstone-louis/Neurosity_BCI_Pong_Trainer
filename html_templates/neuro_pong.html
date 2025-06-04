@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeuroPong - WebSocket Control (New 3-Class)</title>
+    <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+    <style>
+        /* Styles aiming for layout similar to original neuro_pong.html */
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden; /* Prevent scrollbars */
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            justify-content: center; /* Center content vertically */
+            align-items: center;
+            height: 100%; /* Use height instead of min-height */
+            background-color: #282c34;
+            color: white;
+            font-family: sans-serif;
+            padding: 10px 0; /* Vertical padding only */
+            box-sizing: border-box;
+        }
+        canvas {
+            border: 1px solid white;
+            background-color: #000;
+            display: block; /* Prevents extra space */
+            /* JS will set width/height to maximize space while maintaining aspect ratio */
+            flex-shrink: 1; /* Allow canvas to shrink if needed, but prioritize size */
+            max-width: 98%; /* Limit width slightly */
+            object-fit: contain; /* Ensure aspect ratio is maintained */
+        }
+        h1 {
+            margin-top: 0;
+            margin-bottom: 10px; /* Space below title */
+            font-size: 1.8em;
+            flex-shrink: 0; /* Don't shrink title */
+            text-align: center;
+        }
+        /* Container for status/prediction info below canvas */
+        .info-panel {
+             display: flex;
+             justify-content: center;
+             align-items: center;
+             width: 95%;
+             max-width: 800px;
+             flex-wrap: wrap;
+             flex-shrink: 0; /* Don't shrink info panel */
+             margin-top: 10px; /* Space above info panel */
+        }
+        .info-item {
+            margin: 2px 10px;
+            font-size: 0.95em;
+            min-height: 1.2em;
+            text-align: center;
+            white-space: nowrap;
+        }
+        #statusDisplay { color: #ffc107; font-weight: bold;}
+        #predictionDisplay { color: white; }
+        #probabilityDisplay { color: #ccc; }
+        #deltaDisplay { color: #aaa; }
+    </style>
+</head>
+<body>
+    <h1>NeuroPong (3-Class: Rest, L-Fist, R-Fist)</h1>
+    <canvas id="pongCanvas"></canvas>
+    <div class="info-panel">
+        <div id="statusDisplay" class="info-item">Status: Connecting...</div>
+        <div id="predictionDisplay" class="info-item">Prediction: Waiting...</div>
+        <div id="probabilityDisplay" class="info-item">L-Fist: 0.00 | R-Fist: 0.00</div>
+        <div id="deltaDisplay" class="info-item">ΔL-F: +0.00 | ΔR-F: +0.00</div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('pongCanvas');
+        const context = canvas.getContext('2d');
+
+        // --- Game Configuration ---
+        const baseCanvasWidth = 800; // Native resolution width
+        const baseCanvasHeight = 400; // Native resolution height
+        let scaleFactor = 1;
+
+        // --- Game Elements ---
+        let paddleWidth, paddleHeight, ballRadius, paddleSpeed, aiPaddleSpeed;
+
+        function setGameElementSizes() {
+            const currentWidth = canvas.width;
+            scaleFactor = (currentWidth > 0) ? currentWidth / baseCanvasWidth : 1;
+            paddleWidth = 10 * scaleFactor;
+            paddleHeight = 100 * scaleFactor;
+            ballRadius = 10 * scaleFactor;
+            paddleSpeed = 6 * scaleFactor; // Speed for BCI controlled paddle
+            aiPaddleSpeed = 3 * scaleFactor; // Speed for AI paddle
+            if (context) {
+                context.font = `${Math.max(12, 30 * scaleFactor)}px sans-serif`;
+            } else { console.error("Canvas context missing in setGameElementSizes"); }
+        }
+
+        // --- Game State ---
+        let paddle1 = { x: 0, y: 0, width: 0, height: 0, color: 'white', velocityY: 0 }; // Player paddle (BCI)
+        let paddle2 = { x: 0, y: 0, width: 0, height: 0, color: 'white' }; // AI paddle
+        let ball = { x: 0, y: 0, radius: 0, speedX: 0, speedY: 0, color: 'white' };
+        let player1Score = 0; let player2Score = 0;
+
+        // --- Neurosity Prediction State ---
+        let currentPredictedCommand = "Initializing...";
+        // Store probabilities for the new commands
+        let previousProbLeftFist = 0; 
+        let previousProbRightFist = 0;
+        let lastSpikeTimestamp = 0; 
+        let lastMoveCommand = null; // Will store "Left_Fist" or "Right_Fist"
+
+        const predictionDisplay = document.getElementById('predictionDisplay');
+        const probabilityDisplay = document.getElementById('probabilityDisplay');
+        const deltaDisplay = document.getElementById('deltaDisplay');
+        const statusDisplay = document.getElementById('statusDisplay');
+
+        // --- WebSocket Connection ---
+        let socket = null;
+
+        function connectWebSocket() {
+            console.log("Attempting WebSocket connection...");
+            statusDisplay.textContent = 'Status: Connecting...';
+            statusDisplay.style.color = '#ffc107';
+
+            if (socket && socket.connected) { socket.disconnect(); }
+
+            if (typeof io === 'undefined') {
+                console.error("Socket.IO library (io) not loaded!");
+                statusDisplay.textContent = 'Status: Lib Load Error';
+                statusDisplay.style.color = '#dc3545';
+                return; 
+            }
+
+            socket = io(window.location.origin, {
+                reconnectionAttempts: 5, timeout: 10000
+            });
+
+            socket.on('connect', () => {
+                console.log('WebSocket Connected!', socket.id);
+                statusDisplay.textContent = 'Status: Connected';
+                statusDisplay.style.color = '#28a745';
+            });
+
+            socket.on('connection_ack', (data) => {
+                console.log('Received connection_ack:', data);
+                if (statusDisplay.textContent.includes('Connecting')) {
+                     statusDisplay.textContent = `Status: Connected (${data.message})`;
+                     statusDisplay.style.color = '#28a745';
+                }
+            });
+
+            socket.on('disconnect', (reason) => {
+                console.log('WebSocket Disconnected! Reason:', reason);
+                statusDisplay.textContent = `Status: Disconnected (${reason})`;
+                statusDisplay.style.color = '#dc3545';
+                paddle1.velocityY = 0; 
+                // Reset probabilities for new commands
+                previousProbLeftFist = 0; 
+                previousProbRightFist = 0;
+            });
+
+            socket.on('connect_error', (err) => {
+                console.error('WebSocket Connection Error:', err);
+                statusDisplay.textContent = `Status: Conn. Error`; 
+                statusDisplay.style.color = '#dc3545';
+            });
+
+            // --- WebSocket Listener for Predictions ---
+             socket.on('prediction_update', (data) => {
+                if (!data) return;
+                if (data.predicted_label) { 
+                    currentPredictedCommand = data.predicted_label; 
+                    predictionDisplay.textContent = `Prediction: ${currentPredictedCommand}`; 
+                } else { 
+                    predictionDisplay.textContent = `Prediction: N/A`; 
+                }
+
+                let currentProbLeftFist = 0; 
+                let currentProbRightFist = 0; 
+                let deltaLeftFist = 0; 
+                let deltaRightFist = 0;
+
+                if (data.probabilities) {
+                    // *** UPDATED to use new command names from Python backend ***
+                    currentProbLeftFist = data.probabilities['Left_Fist'] || 0; 
+                    currentProbRightFist = data.probabilities['Right_Fist'] || 0;
+                    
+                    probabilityDisplay.textContent = `L-Fist: ${currentProbLeftFist.toFixed(2)} | R-Fist: ${currentProbRightFist.toFixed(2)}`;
+                    
+                    deltaLeftFist = currentProbLeftFist - previousProbLeftFist; 
+                    deltaRightFist = currentProbRightFist - previousProbRightFist;
+                    deltaDisplay.textContent = `ΔL-F: ${deltaLeftFist >= 0 ? '+' : ''}${deltaLeftFist.toFixed(2)} | ΔR-F: ${deltaRightFist >= 0 ? '+' : ''}${deltaRightFist.toFixed(2)}`;
+                    
+                    const spikeThreshold = 0.01; 
+                    const dominanceThreshold = 0.01 
+                    const currentTimestamp = Date.now();
+
+                    // *** UPDATED logic to use new command names for paddle control ***
+                    if (deltaLeftFist > spikeThreshold && deltaLeftFist > deltaRightFist + dominanceThreshold) {
+                        if (paddle1.velocityY >= 0) { console.log(`BCI Latch Control: SET UP (Left_Fist)`); }
+                        paddle1.velocityY = -paddleSpeed; 
+                        lastMoveCommand = 'Left_Fist'; // Store the command name
+                        lastSpikeTimestamp = currentTimestamp;
+                    } else if (deltaRightFist > spikeThreshold && deltaRightFist > deltaLeftFist + dominanceThreshold) {
+                         if (paddle1.velocityY <= 0) { console.log(`BCI Latch Control: SET DOWN (Right_Fist)`); }
+                        paddle1.velocityY = paddleSpeed; 
+                        lastMoveCommand = 'Right_Fist'; // Store the command name
+                        lastSpikeTimestamp = currentTimestamp;
+                    }
+                    previousProbLeftFist = currentProbLeftFist; 
+                    previousProbRightFist = currentProbRightFist;
+                } else {
+                    probabilityDisplay.textContent = `L-Fist: --- | R-Fist: ---`; 
+                    deltaDisplay.textContent = `ΔL-F: --- | ΔR-F: ---`;
+                }
+            });
+
+             socket.on('focus_update', (data) => { /* Update UI if needed */ });
+             socket.on('motion_update', (data) => { /* Update UI if needed */ });
+
+        } // End of connectWebSocket function
+
+
+        // --- Resize Canvas Function ---
+        function resizeCanvas() {
+            const h1Elem = document.querySelector('h1');
+            const infoPanelElem = document.querySelector('.info-panel');
+            const h1Height = h1Elem ? h1Elem.offsetHeight : 50;
+            const infoHeight = infoPanelElem ? infoPanelElem.offsetHeight : 50;
+            const verticalPadding = 30; 
+
+            const availableHeight = window.innerHeight - h1Height - infoHeight - verticalPadding;
+            const maxHeight = Math.max(150, availableHeight); 
+            const maxWidth = window.innerWidth * 0.98; 
+            const aspectRatio = baseCanvasWidth / baseCanvasHeight; 
+            let newHeight = maxHeight;
+            let newWidth = newHeight * aspectRatio;
+
+            if (newWidth > maxWidth) {
+                newWidth = maxWidth;
+                newHeight = newWidth / aspectRatio;
+            }
+
+            canvas.width = Math.max(200, newWidth);
+            canvas.height = Math.max(100, newHeight);
+            // console.log(`Resizing canvas to: ${canvas.width.toFixed(0)} x ${canvas.height.toFixed(0)}`); // Less verbose
+            setGameElementSizes(); 
+
+            paddle1.x = 10 * scaleFactor;
+            paddle1.y = Math.max(0, Math.min(canvas.height - paddleHeight, canvas.height / 2 - paddleHeight / 2)); 
+            paddle1.width = paddleWidth;
+            paddle1.height = paddleHeight;
+
+            paddle2.x = canvas.width - paddleWidth - (10 * scaleFactor);
+            paddle2.y = Math.max(0, Math.min(canvas.height - paddleHeight, canvas.height / 2 - paddleHeight / 2)); 
+            paddle2.width = paddleWidth;
+            paddle2.height = paddleHeight;
+
+            ball.radius = ballRadius; 
+
+            if (ball.x > canvas.width - ball.radius) ball.x = canvas.width - ball.radius;
+            if (ball.y > canvas.height - ball.radius) ball.y = canvas.height - ball.radius;
+            if (ball.x < ball.radius) ball.x = ball.radius;
+            if (ball.y < ball.radius) ball.y = ball.radius;
+
+            render(); 
+        }
+
+
+        // --- Drawing Functions ---
+        function drawRect(x, y, w, h, color) { context.fillStyle = color; context.fillRect(x, y, w, h); }
+        function drawCircle(x, y, r, color) { if (r === undefined || r === null || isNaN(r) || r <= 0) { return; } if (x === undefined || x === null || isNaN(x) || y === undefined || y === null || isNaN(y)) { return; } context.fillStyle = color || 'white'; context.fillRect(x - r, y - r, r * 2, r * 2); }
+        function drawText(text, x, y, color) { context.fillStyle = color; context.fillText(text, x, y); }
+        function drawNet() { context.strokeStyle = 'grey'; context.lineWidth = Math.max(1, 2 * scaleFactor); context.setLineDash([10 * scaleFactor, 10 * scaleFactor]); context.beginPath(); context.moveTo(canvas.width / 2, 0); context.lineTo(canvas.width / 2, canvas.height); context.stroke(); context.setLineDash([]); }
+
+        // --- Update Functions ---
+        function updatePaddle1() { if (paddle1.velocityY !== 0) { paddle1.y += paddle1.velocityY; if (paddle1.y < 0) { paddle1.y = 0; paddle1.velocityY = 0; } else if (paddle1.y + paddle1.height > canvas.height) { paddle1.y = canvas.height - paddle1.height; paddle1.velocityY = 0; } } }
+        function updatePaddle2AI() { const paddleCenter = paddle2.y + paddle2.height / 2; const targetY = ball.y; if (paddleCenter < targetY - (paddleHeight * 0.1)) { paddle2.y += aiPaddleSpeed; } else if (paddleCenter > targetY + (paddleHeight * 0.1)) { paddle2.y -= aiPaddleSpeed; } if (paddle2.y < 0) { paddle2.y = 0; } else if (paddle2.y + paddle2.height > canvas.height) { paddle2.y = canvas.height - paddle2.height; } }
+
+        function updateBall() { 
+            if (ball.speedX === 0 && ball.speedY === 0 && player1Score === 0 && player2Score === 0) { 
+                resetBall(); return; 
+            } 
+            ball.x += ball.speedX; 
+            ball.y += ball.speedY; 
+            if (ball.y + ball.radius > canvas.height || ball.y - ball.radius < 0) { 
+                ball.speedY = -ball.speedY; 
+                if (ball.y + ball.radius > canvas.height) ball.y = canvas.height - ball.radius; 
+                if (ball.y - ball.radius < 0) ball.y = ball.radius; 
+            } 
+            let player = (ball.x < canvas.width / 2) ? paddle1 : paddle2; 
+            if (collides(ball, player)) { 
+                if (player === paddle1 && (lastMoveCommand === 'Left_Fist' || lastMoveCommand === 'Right_Fist') && lastSpikeTimestamp > 0) { 
+                    console.log(`Player 1 HIT detected! Command: ${lastMoveCommand}, Spike Time: ${lastSpikeTimestamp}`); 
+                    if(socket && socket.connected) { 
+                        socket.emit('success_signal', { 
+                            command: lastMoveCommand, 
+                            hit_timestamp: Date.now(), 
+                            spike_timestamp: lastSpikeTimestamp 
+                        }); 
+                    } else { 
+                        console.warn("Cannot emit success_signal: WebSocket not connected."); 
+                    } 
+                } 
+                let collidePoint = (ball.y - (player.y + player.height / 2)) / (player.height / 2); 
+                collidePoint = Math.max(-1, Math.min(1, collidePoint)); 
+                let angleRad = collidePoint * (Math.PI / 3); 
+                let currentSpeed = Math.sqrt(ball.speedX**2 + ball.speedY**2); 
+                currentSpeed = Math.max(3 * scaleFactor, currentSpeed); 
+                let direction = (ball.x < canvas.width / 2) ? 1 : -1; 
+                ball.speedX = direction * currentSpeed * Math.cos(angleRad); 
+                ball.speedY = currentSpeed * Math.sin(angleRad); 
+                ball.x = (direction === 1) ? (player.x + player.width + ball.radius) : (player.x - ball.radius); 
+            } else { 
+                if (ball.x + ball.radius < 0) { player2Score++; resetBall(); } 
+                else if (ball.x - ball.radius > canvas.width) { player1Score++; resetBall(); } 
+            } 
+        }
+
+        function collides(b, p) { const pTop = p.y; const pBottom = p.y + p.height; const pLeft = p.x; const pRight = p.x + p.width; const bTop = b.y - b.radius; const bBottom = b.y + b.radius; const bLeft = b.x - b.radius; const bRight = b.x + b.radius; if (b.radius <= 0) return false; return pLeft < bRight && pTop < bBottom && pRight > bLeft && pBottom > bTop; }
+        function resetBall() { if (canvas.width <= 0 || canvas.height <= 0 || scaleFactor <= 0) { console.error("Cannot reset ball: Invalid canvas state."); return; } ball.x = canvas.width / 2; ball.y = canvas.height / 2; ball.radius = ballRadius; const initialSpeed = Math.max(3, 5 * scaleFactor); ball.speedX = (Math.random() > 0.5 ? 1 : -1) * initialSpeed; ball.speedY = (Math.random() * 0.6 + 0.2) * initialSpeed * (Math.random() > 0.5 ? 1 : -1); }
+
+        // --- Render Function ---
+        function render() { if (!context) return; drawRect(0, 0, canvas.width, canvas.height, '#000'); drawNet(); drawText(player1Score, canvas.width / 4, canvas.height / 5, 'white'); drawText(player2Score, 3 * canvas.width / 4, canvas.height / 5, 'white'); drawRect(paddle1.x, paddle1.y, paddle1.width, paddle1.height, paddle1.color); drawRect(paddle2.x, paddle2.y, paddle2.width, paddle2.height, paddle2.color); if (ball) { drawCircle(ball.x, ball.y, ball.radius, ball.color); } }
+
+        // --- Game Loop ---
+        let gameLoopId = null;
+        function gameLoop() { try { updatePaddle1(); updatePaddle2AI(); updateBall(); render(); } catch (error) { console.error("Error in game loop:", error); } gameLoopId = requestAnimationFrame(gameLoop); }
+
+        // --- Initialization ---
+        function initializeGame() {
+            console.log("Initializing game (New 3-Class Model)...");
+            if (!canvas || !context) { console.error("Canvas or context not ready."); return; }
+            resizeCanvas(); 
+            resetBall();    
+            // console.log(`initializeGame: Ball state after reset: x=${ball.x?.toFixed(1)}, y=${ball.y?.toFixed(1)}, r=${ball.radius?.toFixed(1)}`); // Less verbose
+            if (gameLoopId === null) { gameLoopId = requestAnimationFrame(gameLoop); console.log("Game loop started."); }
+            connectWebSocket(); 
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        window.addEventListener('load', initializeGame);
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ensemble BCI Classifier Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif; /* Matches general preference */
+        }
+        .probability-bar-bg {
+            background-color: #e5e7eb; /* gray-200 */
+            border-radius: 0.25rem; /* rounded */
+            overflow: hidden;
+            height: 1.5rem; /* h-6 */
+            width: 100%;
+        }
+        .probability-bar-fill {
+            background-color: #3b82f6; /* blue-500 */
+            height: 100%;
+            transition: width 0.3s ease-in-out;
+            text-align: right;
+            padding-right: 0.5rem;
+            color: white;
+            font-size: 0.75rem; /* text-xs for percentage */
+            line-height: 1.5rem; /* to vertically center text in bar */
+        }
+        .highlight-prediction {
+            border: 2px solid #2563eb; /* blue-600 */
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+        }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body class="bg-slate-900 text-slate-100 flex flex-col items-center justify-start min-h-screen p-4 sm:p-6 md:p-8">
+
+    <header class="w-full max-w-4xl mb-6 text-center">
+        <h1 class="text-3xl sm:text-4xl font-bold text-sky-400">Ensemble BCI Prediction Dashboard</h1>
+        <p id="connection-status" class="text-sm text-amber-400 mt-1">Connecting...</p>
+    </header>
+
+    <main class="w-full max-w-4xl grid grid-cols-1 md:grid-cols-3 gap-6">
+        <section class="md:col-span-3 bg-slate-800 p-6 rounded-xl shadow-2xl">
+            <h2 class="text-xl font-semibold text-sky-500 mb-3">Overall Prediction</h2>
+            <div id="overall-prediction" class="text-4xl font-bold text-emerald-400 bg-slate-700 p-6 rounded-lg text-center min-h-[80px] flex items-center justify-center">
+                Initializing...
+            </div>
+            <div id="prediction-details" class="mt-4 text-xs text-slate-400 flex flex-wrap justify-center gap-x-4 gap-y-1">
+                <span>Exec Time: N/A ms</span>
+                <span>Timestamp: N/A</span>
+            </div>
+        </section>
+
+        <section class="md:col-span-3 bg-slate-800 p-6 rounded-xl shadow-2xl">
+            <h2 class="text-xl font-semibold text-sky-500 mb-4">Class Probabilities</h2>
+            <div id="class-probabilities-container" class="space-y-3">
+                </div>
+        </section>
+        
+        <section class="bg-slate-800 p-6 rounded-xl shadow-2xl">
+            <h2 class="text-xl font-semibold text-sky-500 mb-3">Focus</h2>
+            <div id="focus-score" class="text-2xl font-medium text-slate-200">N/A %</div>
+        </section>
+        
+        <section class="md:col-span-2 bg-slate-800 p-6 rounded-xl shadow-2xl">
+            <h2 class="text-xl font-semibold text-sky-500 mb-3">Motion (Accelerometer)</h2>
+            <div id="motion-data" class="text-sm text-slate-300 space-y-1">
+                <div>X: N/A, Y: N/A, Z: N/A</div>
+                </div>
+        </section>
+
+        <section class="md:col-span-3 bg-slate-800 p-6 rounded-xl shadow-2xl">
+            <h2 class="text-xl font-semibold text-sky-500 mb-3">Training Session Control</h2>
+            <div class="flex flex-col sm:flex-row items-center gap-4">
+                <select id="command-select" class="bg-slate-700 border border-slate-600 text-slate-100 text-sm rounded-lg focus:ring-sky-500 focus:border-sky-500 p-2.5 w-full sm:w-auto">
+                    </select>
+                <button id="start-session-btn" class="bg-sky-600 hover:bg-sky-700 text-white font-medium py-2 px-4 rounded-lg w-full sm:w-auto transition-colors">
+                    Start Session
+                </button>
+                <button id="stop-session-btn" class="bg-rose-600 hover:bg-rose-700 text-white font-medium py-2 px-4 rounded-lg w-full sm:w-auto transition-colors" disabled>
+                    Stop Session
+                </button>
+            </div>
+            <div id="session-status" class="mt-3 text-sm text-slate-300">Status: Idle</div>
+            <div id="session-prompt" class="mt-2 text-lg font-semibold text-amber-400 min-h-[28px]"></div>
+        </section>
+
+    </main>
+
+    <footer class="w-full max-w-4xl mt-8 text-center text-xs text-slate-500">
+        <p>Neurosity Ensemble BCI Interface</p>
+    </footer>
+
+    <script>
+        // This list should be derived from your Python script's COMMAND_NAME_MAPPING keys
+        // and the order from LIST_OF_TARGET_ORIGINAL_LABELS after LabelEncoding.
+        // The REVERSE_ENCODED_LABEL_TO_COMMAND_NAME in python will produce these names in order of encoded labels 0-7.
+        const commandNames = [
+            "Rest",          // Corresponds to Original Label 0 (Encoded 0)
+            "Left Arm",      // Corresponds to Original Label 2 (Encoded 1)
+            "Tongue",        // Corresponds to Original Label 4 (Encoded 2)
+            "Jumping Jacks", // Corresponds to Original Label 6 (Encoded 3)
+            "Left Foot",     // Corresponds to Original Label 7 (Encoded 4)
+            "Push",          // Corresponds to Original Label 8 (Encoded 5)
+            "Disappear",     // Corresponds to Original Label 22 (Encoded 6)
+            "Unknown"        // Corresponds to Original Label 34 (Encoded 7)
+        ];
+        // The above list should be in the same order as the labels used in your model.
+
+
+        // Populate command select dropdown
+        const commandSelect = document.getElementById('command-select');
+        commandNames.forEach(name => {
+            if (name !== "Unknown") { // Don't add "Unknown" as a trainable command
+                const option = document.createElement('option');
+                option.value = name;
+                option.textContent = name;
+                commandSelect.appendChild(option);
+            }
+        });
+
+
+        const socket = io(); // Connect to the server
+
+        const connectionStatusEl = document.getElementById('connection-status');
+        const overallPredictionEl = document.getElementById('overall-prediction');
+        const predictionDetailsEl = document.getElementById('prediction-details');
+        const probabilitiesContainer = document.getElementById('class-probabilities-container');
+        const focusScoreEl = document.getElementById('focus-score');
+        const motionDataEl = document.getElementById('motion-data');
+
+        const startSessionBtn = document.getElementById('start-session-btn');
+        const stopSessionBtn = document.getElementById('stop-session-btn');
+        const sessionStatusEl = document.getElementById('session-status');
+        const sessionPromptEl = document.getElementById('session-prompt');
+
+
+        // Initialize probability displays
+        function initializeProbabilities() {
+            probabilitiesContainer.innerHTML = ''; // Clear previous
+            commandNames.forEach(name => {
+                const commandDiv = document.createElement('div');
+                commandDiv.classList.add('grid', 'grid-cols-[120px_1fr_60px]', 'items-center', 'gap-2', 'p-2', 'bg-slate-700', 'rounded-md');
+                commandDiv.id = `prob-${name.replace(/\s+/g, '-')}`; // Create a unique ID
+
+                const nameSpan = document.createElement('span');
+                nameSpan.classList.add('text-sm', 'font-medium', 'text-slate-300', 'truncate');
+                nameSpan.textContent = name;
+
+                const barBg = document.createElement('div');
+                barBg.classList.add('probability-bar-bg');
+                const barFill = document.createElement('div');
+                barFill.classList.add('probability-bar-fill');
+                barFill.id = `bar-${name.replace(/\s+/g, '-')}`;
+                barFill.style.width = '0%';
+                barFill.textContent = '0%';
+                barBg.appendChild(barFill);
+                
+                const valueSpan = document.createElement('span');
+                valueSpan.classList.add('text-sm', 'font-semibold', 'text-sky-400', 'text-right');
+                valueSpan.id = `val-${name.replace(/\s+/g, '-')}`;
+                valueSpan.textContent = '0.000';
+
+                commandDiv.appendChild(nameSpan);
+                commandDiv.appendChild(barBg);
+                commandDiv.appendChild(valueSpan);
+                probabilitiesContainer.appendChild(commandDiv);
+            });
+        }
+
+        socket.on('connect', () => {
+            connectionStatusEl.textContent = 'Connected to BCI server';
+            connectionStatusEl.classList.remove('text-amber-400');
+            connectionStatusEl.classList.add('text-emerald-400');
+            console.log('Socket.IO connected');
+        });
+
+        socket.on('disconnect', () => {
+            connectionStatusEl.textContent = 'Disconnected. Attempting to reconnect...';
+            connectionStatusEl.classList.remove('text-emerald-400');
+            connectionStatusEl.classList.add('text-amber-400');
+            console.log('Socket.IO disconnected');
+        });
+
+        socket.on('prediction_update', (data) => {
+            // console.log('Prediction update:', data);
+            if (data.predicted_label) {
+                overallPredictionEl.textContent = data.predicted_label;
+            }
+            if (data.executionTime !== undefined && data.timestamp !== undefined) {
+                predictionDetailsEl.innerHTML = `
+                    <span>Exec Time: ${data.executionTime.toFixed(1)} ms</span>
+                    <span>Timestamp: ${new Date(data.timestamp).toLocaleTimeString()}</span>
+                `;
+            }
+
+            if (data.probabilities) {
+                // Remove previous highlights
+                document.querySelectorAll('.probability-item-highlight').forEach(el => {
+                    el.classList.remove('probability-item-highlight', 'bg-sky-700', 'ring-2', 'ring-sky-500');
+                     el.classList.add('bg-slate-700');
+                });
+
+                for (const commandName in data.probabilities) {
+                    if (data.probabilities.hasOwnProperty(commandName)) {
+                        const probability = data.probabilities[commandName];
+                        const safeIdName = commandName.replace(/\s+/g, '-');
+                        
+                        const probDiv = document.getElementById(`prob-${safeIdName}`);
+                        const barFillEl = document.getElementById(`bar-${safeIdName}`);
+                        const valueEl = document.getElementById(`val-${safeIdName}`);
+
+                        if (barFillEl && valueEl) {
+                            const percentage = (probability * 100).toFixed(1);
+                            barFillEl.style.width = `${percentage}%`;
+                            barFillEl.textContent = `${percentage}%`;
+                            valueEl.textContent = probability.toFixed(3);
+                        }
+                        if (probDiv && commandName === data.predicted_label) {
+                            probDiv.classList.add('probability-item-highlight', 'bg-sky-700', 'ring-2', 'ring-sky-500');
+                            probDiv.classList.remove('bg-slate-700');
+                        }
+                    }
+                }
+            }
+        });
+
+        socket.on('focus_update', (data) => {
+            if (data.score !== undefined) {
+                focusScoreEl.textContent = `${(data.score * 100).toFixed(1)} %`;
+            }
+        });
+        
+        socket.on('motion_update', (data) => {
+            if (data.accel) {
+                motionDataEl.innerHTML = `<div>X: ${data.accel.x.toFixed(2)}, Y: ${data.accel.y.toFixed(2)}, Z: ${data.accel.z.toFixed(2)}</div>`;
+            } else {
+                 motionDataEl.innerHTML = `<div>X: N/A, Y: N/A, Z: N/A</div>`;
+            }
+        });
+
+        // Session control SocketIO listeners
+        socket.on('session_status', (data) => {
+            sessionStatusEl.textContent = `Status: ${data.status}`;
+            if (data.status.includes("starting") || data.status.includes("in progress")) {
+                startSessionBtn.disabled = true;
+                stopSessionBtn.disabled = false;
+            } else {
+                startSessionBtn.disabled = false;
+                stopSessionBtn.disabled = true;
+            }
+        });
+
+        socket.on('session_prompt', (data) => {
+            sessionPromptEl.textContent = `Prompt: ${data.prompt} (${data.duration > 0 ? data.duration + 's' : 'Done'})`;
+        });
+
+
+        // Session control event listeners
+        startSessionBtn.addEventListener('click', () => {
+            const selectedCommand = commandSelect.value;
+            if (selectedCommand) {
+                socket.emit('start_session', { command: selectedCommand });
+            } else {
+                alert("Please select a command to train.");
+            }
+        });
+
+        stopSessionBtn.addEventListener('click', () => {
+            socket.emit('stop_session');
+        });
+
+
+        // Initialize displays on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeProbabilities();
+            // You might want to fetch initial state if the server provides it upon connection
+        });
+    </script>
+</body>
+</html>
